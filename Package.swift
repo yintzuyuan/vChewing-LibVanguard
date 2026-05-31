@@ -43,9 +43,11 @@ let package = Package(
       targets: ["CandidateKit"]
     )
   },
-  dependencies: buildPackageDependencies {
-    Package.Dependency.package(path: "CSQLite3")
-  },
+  // panda fork divergence: CSQLite3 inlined as Target (see end of file) instead of sub-package.
+  // Reason: SPM rejects local sub-package deps when this package is consumed via stable-version
+  // (.exact / from:) pin from bopomofo-keyboard (#471 Stage 3b). Upstream sync requires re-applying
+  // this Package.swift patch.
+  dependencies: buildPackageDependencies { },
   targets: buildTargets {
     Target.target(
       name: "LibVanguard",
@@ -177,7 +179,8 @@ let package = Package(
       name: "TrieKit",
       dependencies: buildTargetDependencies {
         "SwiftExtension"
-        Target.Dependency.product(name: "CSQLite3", package: "CSQLite3")
+        // panda fork divergence: was `Target.Dependency.product(name: "CSQLite3", package: "CSQLite3")`
+        "CSQLite3"
       },
       path: "./Sources/_Modules/TrieKit"
     )
@@ -195,8 +198,46 @@ let package = Package(
       name: "SwiftExtension",
       path: "./Sources/_Modules/SwiftExtension"
     )
+    // panda fork divergence: CSQLite3 inlined as Target (was sub-package via path:).
+    // Sources are the existing ./CSQLite3/Sources/CSQLite3/ tree (sqlite3.c + headers, unchanged).
+    // cSettings mirror ./CSQLite3/Package.swift buildCSQLiteSettings() but drop `.unsafeFlags(["-w"])`
+    // because stable-version-tagged packages reject unsafeFlags. Consumer will see SQLite warnings
+    // during build — functionally identical.
+    Target.target(
+      name: "CSQLite3",
+      path: "./CSQLite3/Sources/CSQLite3",
+      cSettings: pandaCSQLiteSettings()
+    )
   }
 )
+
+// MARK: - panda fork divergence: inline CSQLite3 cSettings
+
+func pandaCSQLiteSettings() -> [CSetting] {
+  var settings: [CSetting] = [
+    .define("SQLITE_THREADSAFE", to: "2"),
+    .define("SQLITE_DEFAULT_CACHE_SIZE", to: "-64000"),
+    .define("SQLITE_DEFAULT_PAGE_SIZE", to: "4096"),
+    .define("SQLITE_DEFAULT_TEMP_CACHE_SIZE", to: "-32000"),
+    .define("SQLITE_OMIT_DEPRECATED"),
+    .define("SQLITE_OMIT_LOAD_EXTENSION"),
+    .define("SQLITE_OMIT_SHARED_CACHE"),
+    .define("SQLITE_OMIT_UTF16"),
+    .define("SQLITE_OMIT_PROGRESS_CALLBACK"),
+    .define("SQLITE_MAX_EXPR_DEPTH", to: "0"),
+    .define("SQLITE_USE_ALLOCA"),
+    .define("SQLITE_ENABLE_MEMORY_MANAGEMENT"),
+    .define("SQLITE_ENABLE_FAST_SECURE_DELETE"),
+  ]
+  #if os(Windows)
+    settings.append(.define("SQLITE_WIN32_MALLOC"))
+    settings.append(.define("SQLITE_WIN32_MALLOC_VALIDATE"))
+  #endif
+  #if canImport(Darwin)
+    settings.append(.define("SQLITE_ENABLE_LOCKING_STYLE", to: "1"))
+  #endif
+  return settings
+}
 
 // MARK: - ArrayBuilder
 
