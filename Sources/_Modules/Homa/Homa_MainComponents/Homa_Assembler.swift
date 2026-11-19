@@ -395,6 +395,65 @@ extension Homa {
       assemble()
     }
 
+    /// 只重查含指定索引鍵的節點。
+    ///
+    /// 語言模型對某些索引鍵的資料狀態變了、鍵字串卻沒變時（例如逐鍵的收尾狀態），
+    /// 查詢快取以鍵字串為準、會回傳舊結果；`assignNodes(updateExisting: true)` 又要清掉全部快取、重查整個軌格。
+    /// 這裡只清掉含這些鍵的快取、只重查涵蓋這些鍵的節點：既有節點就地同步單元圖（與 `assignNodes(updateExisting:)`
+    /// 同語意，保留節點身分），新出現的節點補上，查無結果的多鍵節點移除。成本與受影響的位置數成正比、與軌格長度無關。
+    /// - Parameter changedKeys: 資料狀態變了的索引鍵。
+    /// - Returns: 有節點變動、已重新組句時為 `true`。
+    @discardableResult
+    public func refreshNodes(containingKeys changedKeys: Set<String>) -> Bool {
+      guard !changedKeys.isEmpty else { return false }
+      func touches(_ values: [String]) -> Bool { values.contains(where: changedKeys.contains) }
+      let staleCacheKeys = gramQueryCacheOrder.filter { touches($0.keyArray) }
+      if !staleCacheKeys.isEmpty {
+        let staleSet = Set(staleCacheKeys)
+        staleCacheKeys.forEach { gramQueryCache.removeValue(forKey: $0) }
+        gramQueryCacheOrder.removeAll(where: staleSet.contains)
+      }
+      let hitPositions = keys.indices.filter { touches(keys[$0].allValues) }
+      guard !hitPositions.isEmpty else { return false }
+      var maxSegLength = maxSegLength
+      if maxSegLength > 4, keys.contains(where: \.isMultiple) { maxSegLength = 4 }
+      var spans = Set<[Int]>()
+      for hit in hitPositions {
+        for position in Swift.max(0, hit - maxSegLength + 1) ... hit {
+          let longest = Swift.min(maxSegLength, keys.count - position)
+          guard hit - position + 1 <= longest else { continue }
+          for length in (hit - position + 1) ... longest { spans.insert([position, length]) }
+        }
+      }
+      var nodesChangedCounter = 0
+      var queryBuffer: [GramQueryCacheKey: [Homa.Gram]] = [:]
+      for span in spans.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+        let position = span[0], theLength = span[1]
+        let alternativesSlice = keys[position ..< (position + theLength)]
+        let queriedGrams = queryGramsForAlternatives(alternativesSlice, cache: &queryBuffer)
+        if segments.indices.contains(position), let theNode = segments[position][theLength] {
+          if queriedGrams.isEmpty {
+            if theNode.keyArray.count == 1 { continue }
+            segments[position][theLength] = nil
+          } else {
+            theNode.syncingGrams(from: queriedGrams)
+          }
+          nodesChangedCounter += 1
+          continue
+        }
+        guard !queriedGrams.isEmpty, segments.indices.contains(position) else { continue }
+        segments[position][theLength] = .init(
+          keyArray: alternativesSlice.map(\.first),
+          grams: queriedGrams
+        )
+        nodesChangedCounter += 1
+      }
+      queryBuffer.removeAll()
+      guard nodesChangedCounter != 0 else { return false }
+      assemble()
+      return true
+    }
+
     /// 生成所有節點的覆寫狀態鏡照。
     /// - Returns: 節點 ID 與覆寫狀態的對應字典。
     public func createNodeOverrideStatusMirror() -> [FIUUID: Homa.NodeOverrideStatus] {
